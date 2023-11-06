@@ -1,0 +1,308 @@
+---
+title: "DATA624 - Homework 7"
+author: "Glen Dale Davis"
+date: "2023-10-31"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages:
+
+```{r packages, warning = FALSE, message = FALSE}
+library(caret)
+library(tidyverse)
+library(RColorBrewer)
+library(knitr)
+library(pracma)
+library(cowplot)
+library(AppliedPredictiveModeling)
+library(elasticnet)
+library(glmnet)
+library(VIM)
+
+```
+
+## Exercise 6.2:
+
+Developing a model to predict permeability (see Sect. 1.4) could save significant resources for a pharmaceutical company, while at the same time more rapidly identifying molecules that have a sufficient permeability to become a drug:
+
+* Start R and use these commands to load the data:
+
+```{r ex6_2a}
+data(permeability)
+
+```
+
+The matrix `fingerprints` contains the 1,107 binary molecular predictors for the 165 compounds, while `permeability` contains permeability response.
+
+* The fingerprint predictors indicate the presence or absence of substructures of a molecule and are often sparse meaning that relatively few of the molecules contain each substructure. Filter out the predictors that have low frequencies using the `nearZeroVar` function from the `caret` package. How many predictors are left for modeling?
+
+```{r ex6_2b}
+nzv_predictors <- nearZeroVar(fingerprints, names = TRUE, saveMetrics = FALSE)
+fingerprints <- as.data.frame(fingerprints) |>
+    select(-all_of(nzv_predictors))
+print(ncol(fingerprints))
+
+```
+719 near-zero-variance predictors were removed, leaving 388 predictors for modeling.
+
+* Split the data into a training and a test set, pre-process the data, and tune a PLS model. How many latent variables are optimal and what is the corresponding resampled estimate of $R^2$?
+
+We combine the predictor and response data, shuffle it, then split it into train and test sets. We then separate the predictor and response data again.
+
+```{r ex6_2c}
+# Combine predictors and response
+fingerprints$Permeability <- permeability
+
+# Train and test split
+set.seed(1006)
+rows <- sample(nrow(fingerprints))
+fingerprints <- fingerprints[rows, ]
+sample <- sample(c(TRUE, FALSE), nrow(fingerprints), replace=TRUE,
+                 prob=c(0.7,0.3))
+train_df <- fingerprints[sample, ]
+train_x <- train_df |>
+    select(-Permeability)
+train_y <- train_df$Permeability
+train_y <- as.numeric(train_y)
+test_df <- fingerprints[!sample, ]
+test_x <- test_df |>
+    select(-Permeability)
+test_y <- test_df$Permeability
+test_y <- as.numeric(test_y)
+
+```
+
+We check whether there are any NA values that need to be imputed.
+
+```{r ex6_2d}
+# Check for NA values
+any(is.na(train_df)) | any(is.na(test_df))
+
+```
+There are not. 
+
+We center and scale the data as a pre-processing step in tuning our model. No variables require BoxCox or other transformations. The resampling method used is 10-fold cross-validation.
+
+```{r ex6_2e}
+ctrl <- trainControl(method = "cv", # 10-fold CV
+                     number = 10)
+# Pre-processing includes centering and scaling; no BoxCox transformations
+plsTune <- train(train_x, train_y, method = "pls", tuneLength = 20,
+                 trControl = ctrl, preProc = c("center", "scale"))
+plsTune
+
+```
+
+The optimal number of latent variables is 2, and the corresponding resampled estimate of $R^2$ is $0.52$.
+
+* Predict the response for the test set. What is the test set estimate of $R^2$?
+
+```{r ex6_2f}
+test_pred <- predict(plsTune, test_x)
+SS_test_total <- sum((test_y - mean(train_y))^2)
+SS_test_residual <- sum((test_y - test_pred)^2)
+SS_test_regression <- sum((test_pred - mean(train_y))^2)
+test_rsq <- 1 - SS_test_residual / SS_test_total
+test_rsq
+test_rsq_check <- as.numeric(R2(test_pred, test_y, form = "traditional"))
+test_rmse <- as.numeric(RMSE(test_pred, test_y))
+
+```
+
+We confirm our formula for predictive $R^2$ matches how the `R2` function from the `caret` package calculates $R^2$ when form is set to "traditional" by seeing if the values returned are reasonably similar.
+
+```{r ex6_2g}
+round(test_rsq, 2) == round(test_rsq_check, 2)
+
+```
+
+The values are reasonably similar, so we can be confident the test set estimate of $R^2$, i.e. predictive $R^2$, is $0.28$.
+
+* Try building other models discussed in this chapter. Do any have better predictive performance?
+
+```{r ex6_2h}
+ridgeGrid <- data.frame(.lambda = 10^seq(3, -3, length = 100),
+                        .alpha = 0)
+ridgeTune <- train(train_x, train_y, method = "glmnet",
+                     tuneGrid = ridgeGrid, trControl = ctrl,
+                     preProc = c("center","scale"))
+ridgeTune
+
+```
+```{r ex6_2i}
+test_pred2 <- predict(ridgeTune, test_x)
+test_rsq2 <- as.numeric(R2(test_pred2, test_y, form = "traditional"))
+test_rmse2 <- as.numeric(RMSE(test_pred2, test_y))
+test_rsq2
+
+```
+
+A ridge regression model with $\lambda = 81.11308$ has a higher predictive $R^2$ than the PLS model, but it also has a slightly higher $RMSE$.
+
+```{r ex6_2j, warning = FALSE, message = FALSE}
+lassoGrid <- ridgeGrid |>
+    mutate(.alpha = 1)
+lassoTune <- train(train_x, train_y, method = "glmnet",
+                     tuneGrid = lassoGrid, trControl = ctrl,
+                     preProc = c("center","scale"))
+lassoTune
+
+```
+```{r ex6_2k}
+test_pred3 <- predict(lassoTune, test_x)
+test_rsq3 <- as.numeric(R2(test_pred3, test_y, form = "traditional"))
+test_rmse3 <- as.numeric(RMSE(test_pred3, test_y))
+test_rsq3
+
+```
+
+A lasso regression model with $\lambda = 0.2656088$ has a slightly higher predictive $R^2$ than the PLS model, but it also has a slightly higher $RMSE$. 
+
+We create a summary table where it's easier to see and compare the various resample $RMSE$ metrics.
+
+```{r ex6_2l}
+models <- list(pls = plsTune, ridge = ridgeTune, lasso = lassoTune)
+resamples(models) |> summary(metric = "RMSE")
+
+```
+We conclude the PLS model should be a better predictor than either the ridge or lasso regression models. If we were to compare test set $RMSE$ instead, the ridge regression model scores the best, however:
+
+```{r }
+tbl <- data.frame(model = c("pls", "ridge", "lasso"),
+                  test_set_RMSE = c(test_rmse, test_rmse2, test_rmse3))
+knitr::kable(tbl, format = "simple")
+
+```
+
+* Would you recommend any of your models to replace the permeability laboratory  experiment?
+
+Despite the fact that the experiment is expensive, there would also be costs associated with making incorrect predictions. Without knowing what either costs are, we can't analyze the trade-offs, so no.
+
+## Exercise 6.3:
+
+A chemical manufacturing process for a pharmaceutical product was discussed in Sect. 1.4. In this problem, the objective is to understand the relationship between biological measurements of the raw materials (predictors), measurements of the manufacturing process (predictors), and the response of product yield. Biological predictors cannot be changed but can be used to assess the quality of the raw material before processing. On the other hand, manufacturing process predictors can be changed in the manufacturing process. Improving product yield by $1\%$ will boost revenue by approximately one hundred thousand dollars per batch:
+
+* Start R and use these commands to load the data:
+
+```{r ex6_3a}
+data(ChemicalManufacturingProcess)
+
+```
+
+The matrix `processPredictors` contains the 57 predictors (12 describing the input biological material and 45 describing the process predictors) for the 176 manufacturing runs. `yield` contains the percent yield for each run.
+
+* A small percentage of cells in the predictor set contain missing values. Use an imputation function to fill in these missing values (e.g., see Sect. 3.8).
+
+```{r ex6_3b, warning = FALSE, message = FALSE}
+x <- colSums(is.na(ChemicalManufacturingProcess))
+missing_val_cols <- names(x[x > 0])
+ChemicalManufacturingProcess <- ChemicalManufacturingProcess |>
+    VIM::kNN(variable = missing_val_cols, k = 15, numFun = weighted.mean,
+             weightDist = TRUE, imp_var = FALSE)
+
+```
+
+* Split the data into a training and a test set, pre-process the data, and tune a model of your choice from this chapter. What is the optimal value of the performance metric?
+
+```{r ex6_3c, warning = FALSE, message = FALSE}
+nzv_predictors <- nearZeroVar(ChemicalManufacturingProcess |> select(-Yield),
+                              names = TRUE, saveMetrics = FALSE)
+ChemicalManufacturingProcess <- ChemicalManufacturingProcess |>
+    select(-all_of(nzv_predictors))
+rows <- sample(nrow(ChemicalManufacturingProcess))
+ChemicalManufacturingProcess <- ChemicalManufacturingProcess[rows, ]
+sample <- sample(c(TRUE, FALSE), nrow(ChemicalManufacturingProcess),
+                 replace=TRUE, prob=c(0.7,0.3))
+train_df2 <- ChemicalManufacturingProcess[sample, ]
+train_x2 <- train_df2 |>
+    select(-Yield)
+train_y2 <- train_df2$Yield
+train_y2 <- as.numeric(train_y2)
+test_df2 <- ChemicalManufacturingProcess[!sample, ]
+test_x2 <- test_df2 |>
+    select(-Yield)
+test_y2 <- test_df2$Yield
+test_y2 <- as.numeric(test_y2)
+lassoTune2 <- train(train_x2, train_y2, method = "glmnet",
+                     tuneGrid = lassoGrid, trControl = ctrl,
+                     preProc = c("center","scale"))
+lassoTune2
+
+```
+
+A lasso model with $\lambda = 0.05722368$ has the smallest $RMSE$ at $1.116216$. 
+
+* Predict the response for the test set. What is the value of the performance metric and how does this compare with the resampled performance metric on the training set?
+
+```{r ex6_3d}
+test_pred4 <- predict(lassoTune2, test_x2)
+test_rsq4 <- as.numeric(R2(test_pred4, test_y2, form = "traditional"))
+test_rmse4 <- as.numeric(RMSE(test_pred4, test_y2))
+tbl <- data.frame(model = c("lasso", "lasso"),
+                  metric = c("test_set_Rsq", "test_set_RMSE"),
+                  value = c(test_rsq4, test_rmse4))
+knitr::kable(tbl, format = "simple")
+
+```
+
+The value of the test set $RMSE$ is higher at $1.4111490$. 
+
+* Which predictors are most important in the model you have trained? Do either the biological or process predictors dominate the list?
+
+The 20 most important predictors in the model we've trained are:
+
+```{r ex6_3e, warning = FALSE, message = FALSE}
+var_imp <- varImp(lassoTune2, lambda = lassoTune2$lambda.min)
+var_imp <- var_imp$importance |>
+    arrange(desc(Overall)) |>
+    top_n(20) |>
+    rownames_to_column()
+cols <- c("Predictor", "Importance")
+colnames(var_imp) <- cols
+knitr::kable(var_imp, format = "simple")
+var_imp_names <- var_imp$Predictor
+
+```
+
+Out of these top 20 predictors, the manufacturing process variables dominate. Only two biological material variables are in the top 20.
+
+* Explore the relationships between each of the top predictors and the response. How could this information be helpful in improving yield in future runs of the  manufacturing process?
+
+The coefficients for the top 20 predictors are:
+
+```{r ex6_3f}
+coef_var_imp <- as.matrix(coef(lassoTune2$finalModel, lassoTune2$bestTune$lambda))
+coef_var_imp <- as.data.frame(coef_var_imp) |>
+    rownames_to_column() |>
+    filter(rowname %in% var_imp_names) |>
+    arrange(desc(s1))
+cols <- c("Predictor", "Coefficient")
+colnames(coef_var_imp) <- cols
+knitr::kable(coef_var_imp, format = "simple")
+
+```
+
+To improve yield, these are the variables that we need to increase (in order of importance):
+
+```{r ex6_3g}
+coef_pos_impact <- coef_var_imp |>
+    filter(Coefficient > 0)
+knitr::kable(coef_pos_impact, format = "simple")
+
+```
+
+And these are the variables that we need to decrease (also in order of importance):
+
+```{r ex6_3h}
+coef_neg_impact <- coef_var_imp |>
+    filter(Coefficient < 0) |>
+    arrange(Coefficient)
+knitr::kable(coef_neg_impact, format = "simple")
+
+```
